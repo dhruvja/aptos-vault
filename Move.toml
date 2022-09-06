@@ -1,0 +1,9 @@
+[package]
+name = 'vault'
+version = '1.0.0'
+
+[addresses]
+Vault = "460b8c86da151a8f5fdd4d42b5d33015d728138f132064fe1656fab58a2bf128"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework/", rev="devnet"}
