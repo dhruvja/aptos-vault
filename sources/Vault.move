@@ -15,6 +15,8 @@ module Vault::SimpleVault {
     const EINVALID_AMOUNT: u64 = 6;
     const EVAULT_NOT_CREATED: u64 = 7;
     const ELOW_BALANCE: u64 = 8;
+    const EALREADY_PAUSED: u64 = 9;
+    const EALREADY_UNPAUSED: u64 = 10;
 
     // Resources
     struct Admin has key {
@@ -88,6 +90,28 @@ module Vault::SimpleVault {
        let vault_resource_signer = account::create_signer_with_capability(&vault.vault_resource_cap);
        coin::transfer<CoinType>(&vault_resource_signer, withdrawer_addr, amount);
        vault.deposit_amount = vault.deposit_amount - amount;
+    }
+
+    public entry fun pause(admin: &signer, vault_info_resource: address) acquires VaultInfo {
+        let admin_addr = signer::address_of(admin);
+        assert!(exists<VaultInfo>(vault_info_resource), EINVALID_VAULT_INFO_RESOURCE_ACCOUNT);  
+        let vault_info = borrow_global_mut<VaultInfo>(vault_info_resource);
+        assert!(exists<Admin>(vault_info.authority), EINVALID_SIGNER); 
+        assert!(vault_info.authority == admin_addr, EINVALID_SIGNER); 
+        assert!(vault_info.pause, EALREADY_PAUSED);
+
+        vault_info.pause = true;
+    }
+
+    public entry fun unpause(admin: &signer, vault_info_resource: address) acquires VaultInfo {
+        let admin_addr = signer::address_of(admin);
+        assert!(exists<VaultInfo>(vault_info_resource), EINVALID_VAULT_INFO_RESOURCE_ACCOUNT);  
+        let vault_info = borrow_global_mut<VaultInfo>(vault_info_resource);
+        assert!(exists<Admin>(vault_info.authority), EINVALID_SIGNER); 
+        assert!(vault_info.authority == admin_addr, EINVALID_SIGNER); 
+        assert!(!vault_info.pause, EALREADY_UNPAUSED);
+
+        vault_info.pause = false;
     }
 
     #[test_only]
