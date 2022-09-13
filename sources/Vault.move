@@ -1,16 +1,19 @@
 module Vault::SimpleVault {
     use std::signer;
+    use std::bcs;
+    use std::vector;
 
     use aptos_framework::account;
     use aptos_framework::coin;
     use aptos_framework::managed_coin;
 
+    use aptos_std::type_info;
+    
     //Errors
     const EINVALID_SIGNER: u64 = 0;
     const EADMIN_ALREADY_EXISTS: u64 = 1;
-    const EVAULTINFO_NOT_CREATED: u64 = 2;
     const EADMIN_NOT_CREATED: u64 = 3;
-    const EINVALID_VAULT_INFO_RESOURCE_ACCOUNT: u64 = 4;
+    const EINVALID_ADMIN_ACCOUNT: u64 = 4;
     const EDEPOSIT_IS_PAUSED: u64 = 5;
     const EINVALID_AMOUNT: u64 = 6;
     const EVAULT_NOT_CREATED: u64 = 7;
@@ -21,18 +24,14 @@ module Vault::SimpleVault {
 
     // Resources
     struct Admin has key {
-        resource_account: address
-    }
-
-    struct VaultInfo has key {
-        pause: bool,
-        authority: address
+        pause: bool
     }
 
     struct Vault has key{
         deposit_amount: u64,
         vault_resource_account: address,
-        vault_resource_cap: account::SignerCapability
+        vault_resource_cap: account::SignerCapability,
+        coin_address: address
     }
     
     public entry fun create_admin(admin: &signer) {
@@ -40,52 +39,45 @@ module Vault::SimpleVault {
         assert!(admin_addr == @Vault, EINVALID_SIGNER);
         assert!(!exists<Admin>(admin_addr), EADMIN_ALREADY_EXISTS);
 
-        // Creating a resource account for the vault to store global information like pause status and coin address
-        let seed = b"admin";
-        let (vault_resource, _vault_resource_signer_cap) = account::create_resource_account(admin, seed);
-        let vault_resource_addr = signer::address_of(&vault_resource);
-        move_to<Admin>(admin, Admin{resource_account: vault_resource_addr});
-        move_to<VaultInfo>(&vault_resource, VaultInfo{pause: false, authority: admin_addr});
+        move_to<Admin>(admin, Admin{pause: false});
     }
 
-    public entry fun deposit<CoinType>(depositor: &signer, vault_info_resource: address, amount: u64) acquires VaultInfo, Vault{
-       assert!(exists<VaultInfo>(vault_info_resource), EINVALID_VAULT_INFO_RESOURCE_ACCOUNT); 
-       let vault_info = borrow_global<VaultInfo>(vault_info_resource);
+    public entry fun deposit<CoinType>(depositor: &signer, vault_info_resource: address, vault_resource: address,amount: u64) acquires Admin, Vault{
+       assert!(exists<Admin>(vault_info_resource), EINVALID_ADMIN_ACCOUNT); 
+       let vault_info = borrow_global<Admin>(vault_info_resource);
        assert!(vault_info.pause == false, EDEPOSIT_IS_PAUSED);
-       assert!(exists<Admin>(vault_info.authority), EINVALID_SIGNER);
+
+       let type_info = type_info::type_of<CoinType>();
+       let addr = type_info::account_address(&type_info);
+       let bytes = bcs::to_bytes(&addr);
 
        let depositor_addr = signer::address_of(depositor); 
-       let vault_resource_addr;
        let seed = b"vault";
-       if (exists<Vault>(depositor_addr)) {
-            let vault = borrow_global<Vault>(depositor_addr);
-            vault_resource_addr = vault.vault_resource_account; 
-       } else {
-            let (vault_resource_account, vault_resource_signer_cap) = account::create_resource_account(depositor, seed);
+       vector::append(&mut bytes, seed);
+       if (!exists<Vault>(vault_resource)) {
+            /// A resource account is created for every different type of coin deposit. So a user can now deposit any coin of any amount.
+            let (vault_resource_account, vault_resource_signer_cap) = account::create_resource_account(depositor, bytes);
             managed_coin::register<CoinType>(&vault_resource_account);
-            vault_resource_addr = signer::address_of(&vault_resource_account);
-            move_to<Vault>(depositor, Vault{deposit_amount: 0, vault_resource_account: vault_resource_addr, vault_resource_cap: vault_resource_signer_cap});
-            
+            vault_resource = signer::address_of(&vault_resource_account);
+            move_to<Vault>(&vault_resource_account, Vault{deposit_amount: 0, vault_resource_account: vault_resource, vault_resource_cap: vault_resource_signer_cap, coin_address: addr});
        };
         let previous_balance = coin::balance<CoinType>(depositor_addr);
-        coin::transfer<CoinType>(depositor, vault_resource_addr, amount);
+        coin::transfer<CoinType>(depositor, vault_resource, amount);
         let after_balance = coin::balance<CoinType>(depositor_addr);
         assert!(previous_balance - after_balance == amount, EINVALID_AMOUNT);
-        let vault = borrow_global_mut<Vault>(depositor_addr);
+        let vault = borrow_global_mut<Vault>(vault_resource);
         vault.deposit_amount = vault.deposit_amount + amount;
     }
 
-    public entry fun withdraw<CoinType>(withdrawer: &signer, vault_info_resource: address, amount: u64) acquires Vault, VaultInfo {
-       assert!(exists<VaultInfo>(vault_info_resource), EINVALID_VAULT_INFO_RESOURCE_ACCOUNT); 
-       let vault_info = borrow_global<VaultInfo>(vault_info_resource);
+    public entry fun withdraw<CoinType>(withdrawer: &signer, vault_info_resource: address, vault_resource: address, amount: u64) acquires Vault, Admin {
+       assert!(exists<Admin>(vault_info_resource), EINVALID_ADMIN_ACCOUNT); 
+       let vault_info = borrow_global<Admin>(vault_info_resource);
        assert!(vault_info.pause == false, EWITHDRAWAL_IS_PAUSED);
-       assert!(exists<Admin>(vault_info.authority), EINVALID_SIGNER); 
        let withdrawer_addr = signer::address_of(withdrawer);
-       assert!(exists<Vault>(withdrawer_addr), EVAULT_NOT_CREATED);
+       assert!(exists<Vault>(vault_resource), EVAULT_NOT_CREATED);
 
-       let vault = borrow_global_mut<Vault>(withdrawer_addr);
-       let vault_resource_addr = vault.vault_resource_account;
-       assert!(coin::balance<CoinType>(vault_resource_addr) >= amount, ELOW_BALANCE);
+       let vault = borrow_global_mut<Vault>(vault_resource);
+       assert!(coin::balance<CoinType>(vault_resource) >= amount, ELOW_BALANCE);
        assert!(vault.deposit_amount >= amount, ELOW_BALANCE);
 
        let vault_resource_signer = account::create_signer_with_capability(&vault.vault_resource_cap);
@@ -93,23 +85,19 @@ module Vault::SimpleVault {
        vault.deposit_amount = vault.deposit_amount - amount;
     }
 
-    public entry fun pause(admin: &signer, vault_info_resource: address) acquires VaultInfo {
+    public entry fun pause(admin: &signer) acquires Admin {
         let admin_addr = signer::address_of(admin);
-        assert!(exists<VaultInfo>(vault_info_resource), EINVALID_VAULT_INFO_RESOURCE_ACCOUNT);  
-        let vault_info = borrow_global_mut<VaultInfo>(vault_info_resource);
-        assert!(exists<Admin>(vault_info.authority), EINVALID_SIGNER); 
-        assert!(vault_info.authority == admin_addr, EINVALID_SIGNER); 
+        assert!(exists<Admin>(admin_addr), EINVALID_ADMIN_ACCOUNT);  
+        let vault_info = borrow_global_mut<Admin>(admin_addr);
         assert!(!vault_info.pause, EALREADY_PAUSED);
 
         vault_info.pause = true;
     }
 
-    public entry fun unpause(admin: &signer, vault_info_resource: address) acquires VaultInfo {
+    public entry fun unpause(admin: &signer) acquires Admin {
         let admin_addr = signer::address_of(admin);
-        assert!(exists<VaultInfo>(vault_info_resource), EINVALID_VAULT_INFO_RESOURCE_ACCOUNT);  
-        let vault_info = borrow_global_mut<VaultInfo>(vault_info_resource);
-        assert!(exists<Admin>(vault_info.authority), EINVALID_SIGNER); 
-        assert!(vault_info.authority == admin_addr, EINVALID_SIGNER); 
+        assert!(exists<Admin>(admin_addr), EINVALID_ADMIN_ACCOUNT);  
+        let vault_info = borrow_global_mut<Admin>(admin_addr);
         assert!(vault_info.pause, EALREADY_UNPAUSED);
 
         vault_info.pause = false;
@@ -118,13 +106,10 @@ module Vault::SimpleVault {
     #[test_only]
     public fun get_resource_account(source: address, seed: vector<u8>)  : address {
         use std::hash;
-        use std::bcs;
-        use std::vector;
-        use aptos_framework::byte_conversions;
+        use aptos_std::from_bcs;
         let bytes = bcs::to_bytes(&source);
         vector::append(&mut bytes, seed);
-        let addr = byte_conversions::to_address(hash::sha3_256(bytes));
-        addr
+        from_bcs::to_address(hash::sha3_256(bytes))
     }
     #[test_only]
     public fun initialize_coin_and_mint(admin: &signer, user: &signer, mint_amount: u64) {
@@ -134,13 +119,6 @@ module Vault::SimpleVault {
         aptos_account::create_account(user_addr);
         managed_coin::register<FakeCoin>(user);
         managed_coin::mint<FakeCoin>(admin, user_addr, mint_amount); 
-    }
-    #[test_only]
-    public fun create_admin_and_return_resource(admin: &signer)  : address{
-        let admin_addr = signer::address_of(admin);
-        let admin_seed = b"admin";
-        let vault_resource_addr = get_resource_account(admin_addr, admin_seed); 
-        return vault_resource_addr
     }
     #[test_only]
     public fun return_mint_amounts(): (u64, u64) {
@@ -158,9 +136,6 @@ module Vault::SimpleVault {
         let admin_addr = signer::address_of(&admin);
         assert!(exists<Admin>(admin_addr), EADMIN_NOT_CREATED);
 
-        let seed = b"admin";
-        let vault_resource_addr = get_resource_account(admin_addr, seed);
-        assert!(exists<VaultInfo>(vault_resource_addr), EVAULTINFO_NOT_CREATED);
     }
 
     #[test(admin = @0x4)]
@@ -171,26 +146,31 @@ module Vault::SimpleVault {
     }
 
     #[test(admin = @Vault, user= @0x2)]
-    public fun end_to_end(admin: signer, user: signer) acquires Vault, VaultInfo {
+    public fun end_to_end(admin: signer, user: signer) acquires Vault, Admin {
         create_admin(&admin);
-        let vault_resource_addr = create_admin_and_return_resource(&admin); 
         let user_addr = signer::address_of(&user);
+        let admin_addr = signer::address_of(&admin);
        
         let (initial_mint_amount, initial_deposit) = return_mint_amounts();
 
         initialize_coin_and_mint(&admin, &user, initial_mint_amount);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount, EINVALID_AMOUNT);
 
-        deposit<FakeCoin>(&user, vault_resource_addr, initial_deposit);
+        deposit<FakeCoin>(&user, admin_addr, admin_addr , initial_deposit);
         let vault_seed = b"vault";
-        let vault_addr = get_resource_account(user_addr, vault_seed);
+        let type_info = type_info::type_of<FakeCoin>();
+        let addr = type_info::account_address(&type_info);
+        let bytes = bcs::to_bytes(&addr);
+        vector::append(&mut bytes, vault_seed);
+        
+        let vault_addr = get_resource_account(user_addr, bytes);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount - initial_deposit, EINVALID_AMOUNT);
         assert!(coin::balance<FakeCoin>(vault_addr) == initial_deposit, EINVALID_AMOUNT);
 
         // Since the withdrawals and deposits are not paused, the user can unstake their deposit
 
         // lets withdraw the deposited amount
-        withdraw<FakeCoin>(&user, vault_resource_addr, initial_deposit);
+        withdraw<FakeCoin>(&user, admin_addr, vault_addr , initial_deposit);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount, EINVALID_AMOUNT);
         assert!(coin::balance<FakeCoin>(vault_addr) == 0, EINVALID_AMOUNT);
 
@@ -198,32 +178,36 @@ module Vault::SimpleVault {
 
     #[test(admin = @Vault, user = @0x2)]
     #[expected_failure(abort_code = 11)]
-    public fun cannot_withdraw_after_pause(admin: signer, user: signer) acquires VaultInfo, Vault {
+    public fun cannot_withdraw_after_pause(admin: signer, user: signer) acquires Admin, Vault {
         create_admin(&admin);
-        let vault_resource_addr = create_admin_and_return_resource(&admin); 
         let user_addr = signer::address_of(&user);
+        let admin_addr = signer::address_of(&admin);
        
         let (initial_mint_amount, initial_deposit) = return_mint_amounts();
 
         initialize_coin_and_mint(&admin, &user, initial_mint_amount);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount, EINVALID_AMOUNT);
 
-        deposit<FakeCoin>(&user, vault_resource_addr, initial_deposit);
+        deposit<FakeCoin>(&user, admin_addr, admin_addr , initial_deposit);
         let vault_seed = b"vault";
-        let vault_addr = get_resource_account(user_addr, vault_seed);
+        let type_info = type_info::type_of<FakeCoin>();
+        let addr = type_info::account_address(&type_info);
+        let bytes = bcs::to_bytes(&addr);
+        vector::append(&mut bytes, vault_seed);
+        let vault_addr = get_resource_account(user_addr, bytes);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount - initial_deposit, EINVALID_AMOUNT);
         assert!(coin::balance<FakeCoin>(vault_addr) == initial_deposit, EINVALID_AMOUNT);
 
-        pause(&admin, vault_resource_addr);
-        withdraw<FakeCoin>(&user, vault_resource_addr, initial_deposit); 
+        pause(&admin);
+        withdraw<FakeCoin>(&user, admin_addr, vault_addr, initial_deposit); 
     }
 
     #[test(admin= @Vault, user = @0x2)]
     #[expected_failure(abort_code = 5)]
-    public fun cannot_deposit_after_pause(admin: signer, user: signer) acquires VaultInfo, Vault {
+    public fun cannot_deposit_after_pause(admin: signer, user: signer) acquires Admin, Vault {
         create_admin(&admin);
-        let vault_resource_addr = create_admin_and_return_resource(&admin); 
         let user_addr = signer::address_of(&user);
+        let admin_addr = signer::address_of(&admin);
        
         let (initial_mint_amount, initial_deposit) = return_mint_amounts();
 
@@ -231,10 +215,10 @@ module Vault::SimpleVault {
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount, EINVALID_AMOUNT); 
 
         // Pausing before depositing
-        pause(&admin, vault_resource_addr);
+        pause(&admin);
 
         // any deposit or withdrawal after this wont happen 
-        deposit<FakeCoin>(&user, vault_resource_addr, initial_deposit);
+        deposit<FakeCoin>(&user, admin_addr, admin_addr, initial_deposit);
     }
 
 
