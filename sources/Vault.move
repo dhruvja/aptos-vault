@@ -160,7 +160,12 @@ module Vault::SimpleVault {
         initialize_coin_and_mint(&admin, &user, initial_mint_amount);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount, EINVALID_AMOUNT);
 
+        /// since this is our first deposit, we are passing a dummy address now ( admin_addr )
+        /// A new resource account would be created when the resource account passed is not created.
+        /// The third parameter can be anything when it our first deposit.
         deposit<FakeCoin>(&user, admin_addr, admin_addr , initial_deposit);
+
+        /// The below code is to derive the seeds which is a combination of seed + coin_address along with source address
         let vault_seed = b"vault";
         let type_info = type_info::type_of<FakeCoin>();
         let addr = type_info::account_address(&type_info);
@@ -171,9 +176,9 @@ module Vault::SimpleVault {
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount - initial_deposit, EINVALID_AMOUNT);
         assert!(coin::balance<FakeCoin>(vault_addr) == initial_deposit, EINVALID_AMOUNT);
 
-        // Since the withdrawals and deposits are not paused, the user can unstake their deposit
+        // Since the withdrawals and deposits are not paused, the user can withdraw their deposit
 
-        // lets withdraw the deposited amount
+        // Withdrawing the deposited amount
         withdraw<FakeCoin>(&user, admin_addr, vault_addr , initial_deposit);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount, EINVALID_AMOUNT);
         assert!(coin::balance<FakeCoin>(vault_addr) == 0, EINVALID_AMOUNT);
@@ -193,17 +198,22 @@ module Vault::SimpleVault {
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount, EINVALID_AMOUNT);
 
         deposit<FakeCoin>(&user, admin_addr, admin_addr , initial_deposit);
+
         let vault_seed = b"vault";
         let type_info = type_info::type_of<FakeCoin>();
         let addr = type_info::account_address(&type_info);
         let bytes = bcs::to_bytes(&addr);
         vector::append(&mut bytes, vault_seed);
+
         let vault_addr = get_resource_account(user_addr, bytes);
         assert!(coin::balance<FakeCoin>(user_addr) == initial_mint_amount - initial_deposit, EINVALID_AMOUNT);
         assert!(coin::balance<FakeCoin>(vault_addr) == initial_deposit, EINVALID_AMOUNT);
 
         pause(&admin);
         withdraw<FakeCoin>(&user, admin_addr, vault_addr, initial_deposit); 
+
+        /// Since the deposits and the withdrawals are paused, any new actions (deposits/withdrawals) would throw an error. 
+        /// In our case we should get an error with abort code 11
     }
 
     #[test(admin= @Vault, user = @0x2)]
@@ -223,6 +233,8 @@ module Vault::SimpleVault {
 
         // any deposit or withdrawal after this wont happen 
         deposit<FakeCoin>(&user, admin_addr, admin_addr, initial_deposit);
+
+        /// Since the deposits/withdrawals are paused, the program should abort with code 5 ( since we are depositing )
     }
 
 
