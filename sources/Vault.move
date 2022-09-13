@@ -36,6 +36,7 @@ module Vault::SimpleVault {
     
     public entry fun create_admin(admin: &signer) {
         let admin_addr = signer::address_of(admin);
+        /// The @Vault is the address of the account publishing the module. So this can be called only once
         assert!(admin_addr == @Vault, EINVALID_SIGNER);
         assert!(!exists<Admin>(admin_addr), EADMIN_ALREADY_EXISTS);
 
@@ -47,13 +48,16 @@ module Vault::SimpleVault {
        let vault_info = borrow_global<Admin>(vault_info_resource);
        assert!(vault_info.pause == false, EDEPOSIT_IS_PAUSED);
 
+       /// Getting the address of the coin deposited
        let type_info = type_info::type_of<CoinType>();
        let addr = type_info::account_address(&type_info);
        let bytes = bcs::to_bytes(&addr);
 
        let depositor_addr = signer::address_of(depositor); 
        let seed = b"vault";
+       // appending the seeds with the address of a coin so it remains unique for a particular user
        vector::append(&mut bytes, seed);
+    
        if (!exists<Vault>(vault_resource)) {
             /// A resource account is created for every different type of coin deposit. So a user can now deposit any coin of any amount.
             let (vault_resource_account, vault_resource_signer_cap) = account::create_resource_account(depositor, bytes);
